@@ -40,6 +40,7 @@
 
 #include <transport/transport.h>
 #include "helper/replacements.h"
+#include <jtag/adapter.h>
 #include <jtag/swd.h>
 #include <jtag/interface.h>
 #include <jtag/commands.h>
@@ -75,7 +76,6 @@ static const struct cmsis_dap_backend *const cmsis_dap_backends[] = {
 /* vid = pid = 0 marks the end of the list */
 static uint16_t cmsis_dap_vid[MAX_USB_IDS + 1] = { 0 };
 static uint16_t cmsis_dap_pid[MAX_USB_IDS + 1] = { 0 };
-static char *cmsis_dap_serial;
 static int cmsis_dap_backend = -1;
 static bool swd_mode;
 
@@ -102,10 +102,16 @@ static bool swd_mode;
 #define INFO_ID_PKT_SZ            0xff      /* short */
 #define INFO_ID_SWO_BUF_SZ        0xfd      /* word */
 
-#define INFO_CAPS_SWD             BIT(0)
-#define INFO_CAPS_JTAG            BIT(1)
-#define INFO_CAPS_SWO_UART        BIT(2)
-#define INFO_CAPS_SWO_MANCHESTER  BIT(3)
+#define INFO_CAPS_SWD                 BIT(0)
+#define INFO_CAPS_JTAG                BIT(1)
+#define INFO_CAPS_SWO_UART            BIT(2)
+#define INFO_CAPS_SWO_MANCHESTER      BIT(3)
+#define INFO_CAPS_ATOMIC_CMDS         BIT(4)
+#define INFO_CAPS_TEST_DOMAIN_TIMER   BIT(5)
+#define INFO_CAPS_SWO_STREAMING_TRACE BIT(6)
+#define INFO_CAPS_UART_PORT           BIT(7)
+#define INFO_CAPS_USB_COM_PORT        BIT(8)
+#define INFO_CAPS__NUM_CAPS               9
 
 /* CMD_LED */
 #define LED_ID_CONNECT            0x00
@@ -203,11 +209,16 @@ static bool swd_mode;
 /* CMSIS-DAP Vendor Commands
  * None as yet... */
 
-static const char * const info_caps_str[] = {
-	"SWD  Supported",
-	"JTAG Supported",
-	"SWO-UART Supported",
-	"SWO-MANCHESTER Supported"
+static const char * const info_caps_str[INFO_CAPS__NUM_CAPS] = {
+	"SWD  supported",
+	"JTAG supported",
+	"SWO-UART supported",
+	"SWO-MANCHESTER supported",
+	"Atomic commands supported",
+	"Test domain timer supported",
+	"SWO streaming trace supported",
+	"UART communication port supported",
+	"UART via USB COM port supported",
 };
 
 struct pending_transfer_result {
@@ -269,7 +280,7 @@ static int cmsis_dap_open(void)
 	const struct cmsis_dap_backend *backend = NULL;
 
 	struct cmsis_dap *dap = calloc(1, sizeof(struct cmsis_dap));
-	if (dap == NULL) {
+	if (!dap) {
 		LOG_ERROR("unable to allocate memory");
 		return ERROR_FAIL;
 	}
@@ -277,20 +288,20 @@ static int cmsis_dap_open(void)
 	if (cmsis_dap_backend >= 0) {
 		/* Use forced backend */
 		backend = cmsis_dap_backends[cmsis_dap_backend];
-		if (backend->open(dap, cmsis_dap_vid, cmsis_dap_pid, cmsis_dap_serial) != ERROR_OK)
+		if (backend->open(dap, cmsis_dap_vid, cmsis_dap_pid, adapter_get_required_serial()) != ERROR_OK)
 			backend = NULL;
 	} else {
 		/* Try all backends */
 		for (unsigned int i = 0; i < ARRAY_SIZE(cmsis_dap_backends); i++) {
 			backend = cmsis_dap_backends[i];
-			if (backend->open(dap, cmsis_dap_vid, cmsis_dap_pid, cmsis_dap_serial) == ERROR_OK)
+			if (backend->open(dap, cmsis_dap_vid, cmsis_dap_pid, adapter_get_required_serial()) == ERROR_OK)
 				break;
 			else
 				backend = NULL;
 		}
 	}
 
-	if (backend == NULL) {
+	if (!backend) {
 		LOG_ERROR("unable to find a matching CMSIS-DAP device");
 		free(dap);
 		return ERROR_FAIL;
@@ -313,8 +324,6 @@ static void cmsis_dap_close(struct cmsis_dap *dap)
 	free(cmsis_dap_handle->packet_buffer);
 	free(cmsis_dap_handle);
 	cmsis_dap_handle = NULL;
-	free(cmsis_dap_serial);
-	cmsis_dap_serial = NULL;
 
 	for (int i = 0; i < MAX_PENDING_REQUESTS; i++) {
 		free(pending_fifo[i].transfers);
@@ -787,8 +796,8 @@ static void cmsis_dap_swd_write_from_queue(struct cmsis_dap *dap)
 		uint32_t data = transfer->data;
 
 		LOG_DEBUG_IO("%s %s reg %x %"PRIx32,
-				cmd & SWD_CMD_APnDP ? "AP" : "DP",
-				cmd & SWD_CMD_RnW ? "read" : "write",
+				cmd & SWD_CMD_APNDP ? "AP" : "DP",
+				cmd & SWD_CMD_RNW ? "read" : "write",
 			  (cmd & SWD_CMD_A32) >> 1, data);
 
 		/* When proper WAIT handling is implemented in the
@@ -802,8 +811,8 @@ static void cmsis_dap_swd_write_from_queue(struct cmsis_dap *dap)
 		 * cmsis_dap_cmd_dap_swd_configure() in
 		 * cmsis_dap_init().
 		 */
-		if (!(cmd & SWD_CMD_RnW) &&
-		    !(cmd & SWD_CMD_APnDP) &&
+		if (!(cmd & SWD_CMD_RNW) &&
+		    !(cmd & SWD_CMD_APNDP) &&
 		    (cmd & SWD_CMD_A32) >> 1 == DP_CTRL_STAT &&
 		    (data & CORUNDETECT)) {
 			LOG_DEBUG("refusing to enable sticky overrun detection");
@@ -811,7 +820,7 @@ static void cmsis_dap_swd_write_from_queue(struct cmsis_dap *dap)
 		}
 
 		command[idx++] = (cmd >> 1) & 0x0f;
-		if (!(cmd & SWD_CMD_RnW)) {
+		if (!(cmd & SWD_CMD_RNW)) {
 			h_u32_to_le(&command[idx], data);
 			idx += 4;
 		}
@@ -886,7 +895,7 @@ static void cmsis_dap_swd_read_process(struct cmsis_dap *dap, int timeout_ms)
 	size_t idx = 3;
 	for (int i = 0; i < transfer_count; i++) {
 		struct pending_transfer_result *transfer = &(block->transfers[i]);
-		if (transfer->cmd & SWD_CMD_RnW) {
+		if (transfer->cmd & SWD_CMD_RNW) {
 			static uint32_t last_read;
 			uint32_t data = le_to_h_u32(&resp[idx]);
 			uint32_t tmp = data;
@@ -895,7 +904,7 @@ static void cmsis_dap_swd_read_process(struct cmsis_dap *dap, int timeout_ms)
 			LOG_DEBUG_IO("Read result: %"PRIx32, data);
 
 			/* Imitate posted AP reads */
-			if ((transfer->cmd & SWD_CMD_APnDP) ||
+			if ((transfer->cmd & SWD_CMD_APNDP) ||
 			    ((transfer->cmd & SWD_CMD_A32) >> 1 == DP_RDBUFF)) {
 				tmp = last_read;
 				last_read = data;
@@ -959,7 +968,7 @@ static void cmsis_dap_swd_queue_cmd(uint8_t cmd, uint32_t *dst, uint32_t data)
 	struct pending_transfer_result *transfer = &(block->transfers[block->transfer_count]);
 	transfer->data = data;
 	transfer->cmd = cmd;
-	if (cmd & SWD_CMD_RnW) {
+	if (cmd & SWD_CMD_RNW) {
 		/* Queue a read transaction */
 		transfer->buffer = dst;
 	}
@@ -968,13 +977,13 @@ static void cmsis_dap_swd_queue_cmd(uint8_t cmd, uint32_t *dst, uint32_t data)
 
 static void cmsis_dap_swd_write_reg(uint8_t cmd, uint32_t value, uint32_t ap_delay_clk)
 {
-	assert(!(cmd & SWD_CMD_RnW));
+	assert(!(cmd & SWD_CMD_RNW));
 	cmsis_dap_swd_queue_cmd(cmd, NULL, value);
 }
 
 static void cmsis_dap_swd_read_reg(uint8_t cmd, uint32_t *value, uint32_t ap_delay_clk)
 {
-	assert(cmd & SWD_CMD_RnW);
+	assert(cmd & SWD_CMD_RNW);
 	cmsis_dap_swd_queue_cmd(cmd, value, 0);
 }
 
@@ -1016,19 +1025,17 @@ static int cmsis_dap_get_caps_info(void)
 	if (retval != ERROR_OK)
 		return retval;
 
-	if (data[0] == 1) {
-		uint8_t caps = data[1];
+	if (data[0] == 1 || data[0] == 2) {
+		uint16_t caps = data[1];
+		if (data[0] == 2)
+			caps |= (uint16_t)data[2] << 8;
 
 		cmsis_dap_handle->caps = caps;
 
-		if (caps & INFO_CAPS_SWD)
-			LOG_INFO("CMSIS-DAP: %s", info_caps_str[0]);
-		if (caps & INFO_CAPS_JTAG)
-			LOG_INFO("CMSIS-DAP: %s", info_caps_str[1]);
-		if (caps & INFO_CAPS_SWO_UART)
-			LOG_INFO("CMSIS-DAP: %s", info_caps_str[2]);
-		if (caps & INFO_CAPS_SWO_MANCHESTER)
-			LOG_INFO("CMSIS-DAP: %s", info_caps_str[3]);
+		for (int i = 0; i < INFO_CAPS__NUM_CAPS; ++i) {
+			if (caps & BIT(i))
+				LOG_INFO("CMSIS-DAP: %s", info_caps_str[i]);
+		}
 	}
 
 	return ERROR_OK;
@@ -1124,6 +1131,11 @@ static int cmsis_dap_swd_switch_seq(enum swd_special_seq seq)
 		s = swd_seq_dormant_to_swd;
 		s_len = swd_seq_dormant_to_swd_len;
 		break;
+	case DORMANT_TO_JTAG:
+		LOG_DEBUG("DORMANT-to-JTAG");
+		s = swd_seq_dormant_to_jtag;
+		s_len = swd_seq_dormant_to_jtag_len;
+		break;
 	default:
 		LOG_ERROR("Sequence %d not supported", seq);
 		return ERROR_FAIL;
@@ -1135,7 +1147,7 @@ static int cmsis_dap_swd_switch_seq(enum swd_special_seq seq)
 
 	/* Atmel EDBG needs renew clock setting after SWJ_Sequence
 	 * otherwise default frequency is used */
-	return cmsis_dap_cmd_dap_swj_clock(jtag_get_speed_khz());
+	return cmsis_dap_cmd_dap_swj_clock(adapter_get_speed_khz());
 }
 
 static int cmsis_dap_swd_open(void)
@@ -1252,7 +1264,7 @@ static int cmsis_dap_init(void)
 
 	/* Now try to connect to the target
 	 * TODO: This is all SWD only @ present */
-	retval = cmsis_dap_cmd_dap_swj_clock(jtag_get_speed_khz());
+	retval = cmsis_dap_cmd_dap_swj_clock(adapter_get_speed_khz());
 	if (retval != ERROR_OK)
 		goto init_err;
 
@@ -1513,7 +1525,7 @@ static void cmsis_dap_add_jtag_sequence(int s_len, const uint8_t *sequence, int 
 				s_offset + offset,
 				tms,
 				tdo_buffer,
-				tdo_buffer == NULL ? 0 : (tdo_buffer_offset + offset)
+				!tdo_buffer ? 0 : (tdo_buffer_offset + offset)
 				);
 		}
 		LOG_DEBUG_IO("END JTAG SEQ SPLIT");
@@ -1530,17 +1542,17 @@ static void cmsis_dap_add_jtag_sequence(int s_len, const uint8_t *sequence, int 
 	/* control byte */
 	queued_seq_buf[queued_seq_buf_end] =
 		(tms ? DAP_JTAG_SEQ_TMS : 0) |
-		(tdo_buffer != NULL ? DAP_JTAG_SEQ_TDO : 0) |
+		(tdo_buffer ? DAP_JTAG_SEQ_TDO : 0) |
 		(s_len == 64 ? 0 : s_len);
 
-	if (sequence != NULL)
+	if (sequence)
 		bit_copy(&queued_seq_buf[queued_seq_buf_end + 1], 0, sequence, s_offset, s_len);
 	else
 		memset(&queued_seq_buf[queued_seq_buf_end + 1], 0, DIV_ROUND_UP(s_len, 8));
 
 	queued_seq_buf_end += cmd_len;
 
-	if (tdo_buffer != NULL) {
+	if (tdo_buffer) {
 		struct pending_scan_result *scan = &pending_scan_results[pending_scan_result_count++];
 		scan->first = queued_seq_tdo_ptr;
 		queued_seq_tdo_ptr += DIV_ROUND_UP(s_len, 8);
@@ -1799,7 +1811,7 @@ static int cmsis_dap_execute_queue(void)
 {
 	struct jtag_command *cmd = jtag_command_queue;
 
-	while (cmd != NULL) {
+	while (cmd) {
 		cmsis_dap_execute_command(cmd);
 		cmd = cmd->next;
 	}
@@ -1995,7 +2007,7 @@ COMMAND_HANDLER(cmsis_dap_handle_cmd_command)
 	uint8_t *command = cmsis_dap_handle->command;
 
 	for (unsigned i = 0; i < CMD_ARGC; i++)
-		command[i] = strtoul(CMD_ARGV[i], NULL, 16);
+		COMMAND_PARSE_NUMBER(u8, CMD_ARGV[i], command[i]);
 
 	int retval = cmsis_dap_xfer(cmsis_dap_handle, CMD_ARGC);
 
@@ -2037,16 +2049,6 @@ COMMAND_HANDLER(cmsis_dap_handle_vid_pid_command)
 	 * cmsis_dap_vid_pid.
 	 */
 	cmsis_dap_vid[i >> 1] = cmsis_dap_pid[i >> 1] = 0;
-
-	return ERROR_OK;
-}
-
-COMMAND_HANDLER(cmsis_dap_handle_serial_command)
-{
-	if (CMD_ARGC == 1)
-		cmsis_dap_serial = strdup(CMD_ARGV[0]);
-	else
-		LOG_ERROR("expected exactly one argument to cmsis_dap_serial <serial-number>");
 
 	return ERROR_OK;
 }
@@ -2106,13 +2108,6 @@ static const struct command_registration cmsis_dap_command_handlers[] = {
 		.mode = COMMAND_CONFIG,
 		.help = "the vendor ID and product ID of the CMSIS-DAP device",
 		.usage = "(vid pid)*",
-	},
-	{
-		.name = "cmsis_dap_serial",
-		.handler = &cmsis_dap_handle_serial_command,
-		.mode = COMMAND_CONFIG,
-		.help = "set the serial number of the adapter",
-		.usage = "serial_string",
 	},
 	{
 		.name = "cmsis_dap_backend",

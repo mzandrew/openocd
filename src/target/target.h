@@ -333,7 +333,7 @@ struct target_timer_callback {
 	unsigned int time_ms;
 	enum target_timer_type type;
 	bool removed;
-	struct timeval when;
+	int64_t when;	/* output of timeval_ms() */
 	void *priv;
 	struct target_timer_callback *next;
 };
@@ -407,6 +407,11 @@ int target_call_timer_callbacks(void);
  * a synchronous command completes.
  */
 int target_call_timer_callbacks_now(void);
+/**
+ * Returns when the next registered event will take place. Callers can use this
+ * to go to sleep until that time occurs.
+ */
+int64_t target_timer_next_event(void);
 
 struct target *get_target_by_num(int num);
 struct target *get_current_target(struct command_context *cmd_ctx);
@@ -542,7 +547,7 @@ int target_step(struct target *target,
 int target_run_algorithm(struct target *target,
 		int num_mem_params, struct mem_param *mem_params,
 		int num_reg_params, struct reg_param *reg_param,
-		uint32_t entry_point, uint32_t exit_point,
+		target_addr_t entry_point, target_addr_t exit_point,
 		int timeout_ms, void *arch_info);
 
 /**
@@ -553,7 +558,7 @@ int target_run_algorithm(struct target *target,
 int target_start_algorithm(struct target *target,
 		int num_mem_params, struct mem_param *mem_params,
 		int num_reg_params, struct reg_param *reg_params,
-		uint32_t entry_point, uint32_t exit_point,
+		target_addr_t entry_point, target_addr_t exit_point,
 		void *arch_info);
 
 /**
@@ -564,7 +569,7 @@ int target_start_algorithm(struct target *target,
 int target_wait_algorithm(struct target *target,
 		int num_mem_params, struct mem_param *mem_params,
 		int num_reg_params, struct reg_param *reg_params,
-		uint32_t exit_point, int timeout_ms,
+		target_addr_t exit_point, int timeout_ms,
 		void *arch_info);
 
 /**
@@ -721,6 +726,13 @@ int target_alloc_working_area(struct target *target,
  */
 int target_alloc_working_area_try(struct target *target,
 		uint32_t size, struct working_area **area);
+/**
+ * Free a working area.
+ * Restore target data if area backup is configured.
+ * @param target
+ * @param area Pointer to the area to be freed or NULL
+ * @returns ERROR_OK if successful; error code if restore failed
+ */
 int target_free_working_area(struct target *target, struct working_area *area);
 void target_free_all_working_areas(struct target *target);
 uint32_t target_get_working_area_avail(struct target *target);
@@ -789,5 +801,7 @@ int target_profiling_default(struct target *target, uint32_t *samples, uint32_t
 #define ERROR_TARGET_ALGO_EXIT  (-313)
 
 extern bool get_target_reset_nag(void);
+
+#define TARGET_DEFAULT_POLLING_INTERVAL		100
 
 #endif /* OPENOCD_TARGET_TARGET_H */
