@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
 /***************************************************************************
  *   Copyright (C) 2005 by Dominic Rath                                    *
  *   Dominic.Rath@gmx.de                                                   *
@@ -11,19 +13,6 @@
  *                                                                         *
  *   Copyright (C) 2009 Zachary T Welch                                    *
  *   zw@superlucidity.net                                                  *
- *                                                                         *
- *   This program is free software; you can redistribute it and/or modify  *
- *   it under the terms of the GNU General Public License as published by  *
- *   the Free Software Foundation; either version 2 of the License, or     *
- *   (at your option) any later version.                                   *
- *                                                                         *
- *   This program is distributed in the hope that it will be useful,       *
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
- *   GNU General Public License for more details.                          *
- *                                                                         *
- *   You should have received a copy of the GNU General Public License     *
- *   along with this program.  If not, see <http://www.gnu.org/licenses/>. *
  ***************************************************************************/
 
 #ifdef HAVE_CONFIG_H
@@ -470,6 +459,7 @@ static int jim_newtap_expected_id(struct jim_nvp *n, struct jim_getopt_info *goi
 #define NTAP_OPT_DISABLED  4
 #define NTAP_OPT_EXPECTED_ID 5
 #define NTAP_OPT_VERSION   6
+#define NTAP_OPT_BYPASS    7
 
 static int jim_newtap_ir_param(struct jim_nvp *n, struct jim_getopt_info *goi,
 	struct jtag_tap *tap)
@@ -532,6 +522,7 @@ static int jim_newtap_cmd(struct jim_getopt_info *goi)
 		{ .name = "-disable",       .value = NTAP_OPT_DISABLED },
 		{ .name = "-expected-id",       .value = NTAP_OPT_EXPECTED_ID },
 		{ .name = "-ignore-version",       .value = NTAP_OPT_VERSION },
+		{ .name = "-ignore-bypass",       .value = NTAP_OPT_BYPASS },
 		{ .name = NULL,       .value = -1 },
 	};
 
@@ -565,13 +556,6 @@ static int jim_newtap_cmd(struct jim_getopt_info *goi)
 
 	LOG_DEBUG("Creating New Tap, Chip: %s, Tap: %s, Dotted: %s, %d params",
 		tap->chip, tap->tapname, tap->dotted_name, goi->argc);
-
-	if (!transport_is_jtag()) {
-		/* SWD doesn't require any JTAG tap parameters */
-		tap->enabled = true;
-		jtag_tap_init(tap);
-		return JIM_OK;
-	}
 
 	/* IEEE specifies that the two LSBs of an IR scan are 01, so make
 	 * that the default.  The "-ircapture" and "-irmask" options are only
@@ -617,6 +601,9 @@ static int jim_newtap_cmd(struct jim_getopt_info *goi)
 		    case NTAP_OPT_VERSION:
 			    tap->ignore_version = true;
 			    break;
+		    case NTAP_OPT_BYPASS:
+			    tap->ignore_bypass = true;
+			    break;
 		}	/* switch (n->value) */
 	}	/* while (goi->argc) */
 
@@ -624,7 +611,7 @@ static int jim_newtap_cmd(struct jim_getopt_info *goi)
 	tap->enabled = !tap->disabled_after_reset;
 
 	/* Did all the required option bits get cleared? */
-	if (tap->ir_length != 0) {
+	if (!transport_is_jtag() || tap->ir_length != 0) {
 		jtag_tap_init(tap);
 		return JIM_OK;
 	}
@@ -887,6 +874,7 @@ static const struct command_registration jtag_subcommand_handlers[] = {
 			"['-enable'|'-disable'] "
 			"['-expected_id' number] "
 			"['-ignore-version'] "
+			"['-ignore-bypass'] "
 			"['-ircapture' number] "
 			"['-mask' number]",
 	},

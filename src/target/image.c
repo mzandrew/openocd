@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
 /***************************************************************************
  *   Copyright (C) 2007 by Dominic Rath                                    *
  *   Dominic.Rath@gmx.de                                                   *
@@ -13,19 +15,6 @@
  *                                                                         *
  *   Copyright (C) 2018 by Advantest                                       *
  *   florian.meister@advantest.com                                         *
- *                                                                         *
- *   This program is free software; you can redistribute it and/or modify  *
- *   it under the terms of the GNU General Public License as published by  *
- *   the Free Software Foundation; either version 2 of the License, or     *
- *   (at your option) any later version.                                   *
- *                                                                         *
- *   This program is distributed in the hope that it will be useful,       *
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
- *   GNU General Public License for more details.                          *
- *                                                                         *
- *   You should have received a copy of the GNU General Public License     *
- *   along with this program.  If not, see <http://www.gnu.org/licenses/>. *
  ***************************************************************************/
 
 #ifdef HAVE_CONFIG_H
@@ -418,12 +407,10 @@ static int image_elf32_read_headers(struct image *image)
 		return ERROR_FILEIO_OPERATION_FAILED;
 	}
 
-	/* count useful segments (loadable), ignore BSS section */
+	/* count useful segments (loadable) */
 	image->num_sections = 0;
 	for (i = 0; i < elf->segment_count; i++)
-		if ((field32(elf,
-			elf->segments32[i].p_type) == PT_LOAD) &&
-			(field32(elf, elf->segments32[i].p_filesz) != 0))
+		if (field32(elf, elf->segments32[i].p_type) == PT_LOAD)
 			image->num_sections++;
 
 	if (image->num_sections == 0) {
@@ -460,10 +447,8 @@ static int image_elf32_read_headers(struct image *image)
 	}
 
 	for (i = 0, j = 0; i < elf->segment_count; i++) {
-		if ((field32(elf,
-			elf->segments32[i].p_type) == PT_LOAD) &&
-			(field32(elf, elf->segments32[i].p_filesz) != 0)) {
-			image->sections[j].size = field32(elf, elf->segments32[i].p_filesz);
+		if (field32(elf, elf->segments32[i].p_type) == PT_LOAD) {
+			image->sections[j].size = field32(elf, elf->segments32[i].p_memsz);
 			if (load_to_vaddr)
 				image->sections[j].base_address = field32(elf,
 						elf->segments32[i].p_vaddr);
@@ -543,12 +528,10 @@ static int image_elf64_read_headers(struct image *image)
 		return ERROR_FILEIO_OPERATION_FAILED;
 	}
 
-	/* count useful segments (loadable), ignore BSS section */
+	/* count useful segments (loadable) */
 	image->num_sections = 0;
 	for (i = 0; i < elf->segment_count; i++)
-		if ((field32(elf,
-			elf->segments64[i].p_type) == PT_LOAD) &&
-			(field64(elf, elf->segments64[i].p_filesz) != 0))
+		if (field32(elf, elf->segments64[i].p_type) == PT_LOAD)
 			image->num_sections++;
 
 	if (image->num_sections == 0) {
@@ -585,10 +568,8 @@ static int image_elf64_read_headers(struct image *image)
 	}
 
 	for (i = 0, j = 0; i < elf->segment_count; i++) {
-		if ((field32(elf,
-			elf->segments64[i].p_type) == PT_LOAD) &&
-			(field64(elf, elf->segments64[i].p_filesz) != 0)) {
-			image->sections[j].size = field64(elf, elf->segments64[i].p_filesz);
+		if (field32(elf, elf->segments64[i].p_type) == PT_LOAD) {
+			image->sections[j].size = field64(elf, elf->segments64[i].p_memsz);
 			if (load_to_vaddr)
 				image->sections[j].base_address = field64(elf,
 						elf->segments64[i].p_vaddr);
@@ -596,7 +577,7 @@ static int image_elf64_read_headers(struct image *image)
 				image->sections[j].base_address = field64(elf,
 						elf->segments64[i].p_paddr);
 			image->sections[j].private = &elf->segments64[i];
-			image->sections[j].flags = field32(elf, elf->segments64[i].p_flags);
+			image->sections[j].flags = field64(elf, elf->segments64[i].p_flags);
 			j++;
 		}
 	}
@@ -662,6 +643,8 @@ static int image_elf32_read_section(struct image *image,
 {
 	struct image_elf *elf = image->type_private;
 	Elf32_Phdr *segment = (Elf32_Phdr *)image->sections[section].private;
+	uint32_t filesz = field32(elf, segment->p_filesz);
+	uint32_t memsz = field32(elf, segment->p_memsz);
 	size_t read_size, really_read;
 	int retval;
 
@@ -670,9 +653,9 @@ static int image_elf32_read_section(struct image *image,
 	LOG_DEBUG("load segment %d at 0x%" TARGET_PRIxADDR " (sz = 0x%" PRIx32 ")", section, offset, size);
 
 	/* read initialized data in current segment if any */
-	if (offset < field32(elf, segment->p_filesz)) {
+	if (offset < filesz) {
 		/* maximal size present in file for the current segment */
-		read_size = MIN(size, field32(elf, segment->p_filesz) - offset);
+		read_size = MIN(size, filesz - offset);
 		LOG_DEBUG("read elf: size = 0x%zx at 0x%" TARGET_PRIxADDR "", read_size,
 			field32(elf, segment->p_offset) + offset);
 		/* read initialized area of the segment */
@@ -686,11 +669,20 @@ static int image_elf32_read_section(struct image *image,
 			LOG_ERROR("cannot read ELF segment content, read failed");
 			return retval;
 		}
+		buffer += read_size;
+		offset += read_size;
 		size -= read_size;
 		*size_read += read_size;
 		/* need more data ? */
 		if (!size)
 			return ERROR_OK;
+	}
+
+	/* clear bss in current segment if any */
+	if (offset >= filesz) {
+		uint32_t memset_size = MIN(size, memsz - filesz);
+		memset(buffer, 0, memset_size);
+		*size_read += memset_size;
 	}
 
 	return ERROR_OK;
@@ -705,6 +697,8 @@ static int image_elf64_read_section(struct image *image,
 {
 	struct image_elf *elf = image->type_private;
 	Elf64_Phdr *segment = (Elf64_Phdr *)image->sections[section].private;
+	uint64_t filesz = field64(elf, segment->p_filesz);
+	uint64_t memsz = field64(elf, segment->p_memsz);
 	size_t read_size, really_read;
 	int retval;
 
@@ -713,9 +707,9 @@ static int image_elf64_read_section(struct image *image,
 	LOG_DEBUG("load segment %d at 0x%" TARGET_PRIxADDR " (sz = 0x%" PRIx32 ")", section, offset, size);
 
 	/* read initialized data in current segment if any */
-	if (offset < field64(elf, segment->p_filesz)) {
+	if (offset < filesz) {
 		/* maximal size present in file for the current segment */
-		read_size = MIN(size, field64(elf, segment->p_filesz) - offset);
+		read_size = MIN(size, filesz - offset);
 		LOG_DEBUG("read elf: size = 0x%zx at 0x%" TARGET_PRIxADDR "", read_size,
 			field64(elf, segment->p_offset) + offset);
 		/* read initialized area of the segment */
@@ -729,11 +723,20 @@ static int image_elf64_read_section(struct image *image,
 			LOG_ERROR("cannot read ELF segment content, read failed");
 			return retval;
 		}
+		buffer += read_size;
+		offset += read_size;
 		size -= read_size;
 		*size_read += read_size;
 		/* need more data ? */
 		if (!size)
 			return ERROR_OK;
+	}
+
+	/* clear bss in current segment if any */
+	if (offset >= filesz) {
+		uint64_t memset_size = MIN(size, memsz - filesz);
+		memset(buffer, 0, memset_size);
+		*size_read += memset_size;
 	}
 
 	return ERROR_OK;
@@ -1168,7 +1171,7 @@ int image_read_section(struct image *image,
 	return ERROR_OK;
 }
 
-int image_add_section(struct image *image, target_addr_t base, uint32_t size, int flags, uint8_t const *data)
+int image_add_section(struct image *image, target_addr_t base, uint32_t size, uint64_t flags, uint8_t const *data)
 {
 	struct imagesection *section;
 

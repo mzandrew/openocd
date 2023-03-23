@@ -1,19 +1,8 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+
 /***************************************************************************
  *   Copyright (C) 2011 by Broadcom Corporation                            *
  *   Evan Hunter - ehunter@broadcom.com                                    *
- *                                                                         *
- *   This program is free software; you can redistribute it and/or modify  *
- *   it under the terms of the GNU General Public License as published by  *
- *   the Free Software Foundation; either version 2 of the License, or     *
- *   (at your option) any later version.                                   *
- *                                                                         *
- *   This program is distributed in the hope that it will be useful,       *
- *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
- *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
- *   GNU General Public License for more details.                          *
- *                                                                         *
- *   You should have received a copy of the GNU General Public License     *
- *   along with this program.  If not, see <http://www.gnu.org/licenses/>. *
  ***************************************************************************/
 
 #ifndef OPENOCD_RTOS_RTOS_H
@@ -113,6 +102,13 @@ struct rtos_register_stacking {
 		const struct rtos_register_stacking *stacking,
 		target_addr_t stack_ptr);
 	const struct stack_register_offset *register_offsets;
+	/* Optional field for targets which may have to implement their own stack read function.
+	 * Because stack format can be weird or stack data needed to be edited before passing to the gdb.
+	 */
+	int (*read_stack)(struct target *target,
+		int64_t stack_ptr,
+		const struct rtos_register_stacking *stacking,
+		uint8_t *stack_data);
 };
 
 #define GDB_THREAD_PACKET_NOT_CONSUMED (-40)
